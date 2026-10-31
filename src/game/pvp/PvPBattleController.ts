@@ -930,6 +930,7 @@ export class PvPBattleController {
 
     this.isBattleActive = false;
     this.isBattleFinished = true;
+    this.roundPhase = 'MATCH_FINISHED';
 
     if (p1Dead && p2Dead) {
       this.winner = 'DRAW';
@@ -954,6 +955,10 @@ export class PvPBattleController {
       );
     }
 
+    this.debug(
+      `Match finished. Winner: ${this.winner}, Reason: ${this.endReason}`
+    );
+
     const snap = this.getSnapshot();
     this.callbacks.onSnapshotChange?.(snap);
     this.callbacks.onBattleFinished?.(snap);
@@ -965,6 +970,7 @@ export class PvPBattleController {
 
     this.isBattleActive = false;
     this.isBattleFinished = true;
+    this.roundPhase = 'MATCH_FINISHED';
     this.endReason = 'TIMEOUT';
 
     if (this.p1Context.health > this.p2Context.health) {
@@ -986,6 +992,10 @@ export class PvPBattleController {
         `Time expired! Equal health (${this.p1Context.health} HP) — Match Draw!`
       );
     }
+
+    this.debug(
+      `Match finished. Winner: ${this.winner}, Reason: ${this.endReason}`
+    );
 
     const snap = this.getSnapshot();
     this.callbacks.onSnapshotChange?.(snap);
