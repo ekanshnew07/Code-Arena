@@ -89,6 +89,9 @@ export const PvPModeLayout: React.FC<PvPModeLayoutProps> = ({
     config.programmingTimeSeconds
   );
 
+  const [combatEvents, setCombatEvents] = useState<CombatEventEntry[]>([]);
+  const [hoveredCell, setHoveredCell] = useState<GridPosition | null>(null);
+
   // Privately stored validated programs
   const p1LockedProgramRef = useRef<PvPInstruction[]>([]);
   const p2LockedProgramRef = useRef<PvPInstruction[]>([]);
@@ -118,8 +121,6 @@ export const PvPModeLayout: React.FC<PvPModeLayoutProps> = ({
   const [battleSnapshot, setBattleSnapshot] = useState<PvPBattleSnapshot>(() =>
     battleController.getSnapshot()
   );
-  const [combatEvents, setCombatEvents] = useState<CombatEventEntry[]>([]);
-  const [hoveredCell, setHoveredCell] = useState<GridPosition | null>(null);
 
   const phaserContainerRef = useRef<HTMLDivElement | null>(null);
   const phaserGameRef = useRef<Phaser.Game | null>(null);

@@ -73,7 +73,7 @@ export class PvPBattleController {
       this.config.maxHealth
     );
 
-    this.resetBattle([], []);
+    this.resetBattle([], [], 'Player 1', 'Player 2', false);
   }
 
   public attachView(view: IPvPArenaView | null): void {
@@ -105,7 +105,8 @@ export class PvPBattleController {
     p1Program: PvPInstruction[] = [],
     p2Program: PvPInstruction[] = [],
     p1Name = 'Player 1',
-    p2Name = 'Player 2'
+    p2Name = 'Player 2',
+    notifyCallbacks = true
   ): void {
     this.battleElapsedMs = 0;
     this.isBattleActive = false;
@@ -126,8 +127,10 @@ export class PvPBattleController {
     this.syncPlayerVariables();
 
     const snap = this.getSnapshot();
-    this.callbacks.onCombatEventsChange?.([]);
-    this.callbacks.onSnapshotChange?.(snap);
+    if (notifyCallbacks) {
+      this.callbacks.onCombatEventsChange?.([]);
+      this.callbacks.onSnapshotChange?.(snap);
+    }
     this.view?.initPvPArena(snap);
   }
 
