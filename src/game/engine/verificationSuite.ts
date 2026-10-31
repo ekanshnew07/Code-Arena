@@ -647,24 +647,25 @@ export async function runInterpreterVerificationSuite(): Promise<{
     );
 
     // =========================================================================
-    // 12. TEST LOCAL HOT-SEAT PvP MODE (Validator, Independent Interpreters,
-    //     Simultaneous Execution, wait(n), Combat, Timeout, Draw & Rematch)
+    // 12. TEST LOCAL HOT-SEAT PvP MODE: CONTINUOUS ROUND-BASED BATTLES
+    //     (5-Slot Validator, Independent Interpreters, Simultaneous Execution,
+    //      wait(n), Persistent State, Multi-Round Progression, Timeout & Rematch)
     // =========================================================================
 
-    // A. PvP Validator: 12-slot limit & restricted command set
+    // A. PvP Validator: 5-slot per-round limit & restricted command set
     const validPvP = validatePvPProgram(
-      `move_right()\nlaser()\nbomb(7, 7)\nshockwave()\nwait(2)\nmove_up()`
+      `move_right()\nlaser()\nbomb(7, 7)\nshockwave()\nwait(2)`
     );
     assert(
-      validPvP.valid && validPvP.instructions.length === 6,
-      'PvP Validator: accepts valid 6-instruction program with movement, laser, bomb, shockwave, wait'
+      validPvP.valid && validPvP.instructions.length === 5,
+      'PvP Validator: accepts valid 5-instruction program (movement, laser, bomb, shockwave, wait)'
     );
 
-    const thirteenLines = Array.from({ length: 13 }, () => 'move_right()').join('\n');
-    const overSlotLimit = validatePvPProgram(thirteenLines);
+    const sixLines = Array.from({ length: 6 }, () => 'move_right()').join('\n');
+    const overSlotLimit = validatePvPProgram(sixLines);
     assert(
-      !overSlotLimit.valid && overSlotLimit.error?.line === 13,
-      `PvP Validator: rejects >12 instructions with line 13 error ('${overSlotLimit.error?.message}')`
+      !overSlotLimit.valid && overSlotLimit.error?.line === 6,
+      `PvP Validator: rejects >5 instructions with line 6 error ('${overSlotLimit.error?.message}')`
     );
 
     const loopRejected = validatePvPProgram('for i in range(3):\n    move_up()');
@@ -713,13 +714,14 @@ export async function runInterpreterVerificationSuite(): Promise<{
 
     const initialPvPSnap = pvpController.getSnapshot();
     assert(
-      initialPvPSnap.p1.x === 2 &&
+      initialPvPSnap.currentRound === 1 &&
+        initialPvPSnap.p1.x === 2 &&
         initialPvPSnap.p1.y === 7 &&
         initialPvPSnap.p1.facing === 'east' &&
         initialPvPSnap.p2.x === 12 &&
         initialPvPSnap.p2.y === 7 &&
         initialPvPSnap.p2.facing === 'west',
-      'PvP Battle: P1 spawns at (2,7) facing east and P2 spawns at (12,7) facing west'
+      'PvP Battle: Round 1 starts with P1 at (2,7) facing east and P2 at (12,7) facing west'
     );
 
     // Advance 700ms (step 1): P1 executes wait(2) (nextActionTimeMs becomes 700 + 2000 = 2700ms),
@@ -729,7 +731,7 @@ export async function runInterpreterVerificationSuite(): Promise<{
     assert(
       snapAfterStep1.p1.x === 2 &&
         snapAfterStep1.p2.x === 11 &&
-        snapAfterStep1.p1.lastActionText.includes('Waiting 2s') &&
+        snapAfterStep1.p1.lastActionText.includes('Waiting (2s)') &&
         snapAfterStep1.p2.lastActionText.includes('Moved Left'),
       `PvP Independent Scheduling: at 700ms P1 executes wait(2) while P2 moves to (${snapAfterStep1.p2.x}, ${snapAfterStep1.p2.y})`
     );
@@ -748,9 +750,9 @@ export async function runInterpreterVerificationSuite(): Promise<{
     stepPvP(pvpController, 700);
     const snapAfterStep3 = pvpController.getSnapshot();
     assert(
-      snapAfterStep3.p1.health === 76 &&
+      snapAfterStep3.p1.health === 65 &&
         snapAfterStep3.p2.stats.laserHits === 1 &&
-        snapAfterStep3.p2.stats.damageDealt === 24 &&
+        snapAfterStep3.p2.stats.damageDealt === 35 &&
         snapAfterStep3.p2.executionState === 'FINISHED',
       `PvP Combat & Completion Isolation: P2 laser hits P1 (HP=${snapAfterStep3.p1.health}) and P2 finishes while P1 is still running`
     );
@@ -759,16 +761,48 @@ export async function runInterpreterVerificationSuite(): Promise<{
     stepPvP(pvpController, 600);
     const snapAfterP1Laser = pvpController.getSnapshot();
     assert(
-      snapAfterP1Laser.p2.health === 76 &&
+      snapAfterP1Laser.p2.health === 65 &&
         snapAfterP1Laser.p1.stats.laserHits === 1 &&
         snapAfterP1Laser.p1.executionState === 'FINISHED',
       `PvP Continued Execution: P1 finishes wait(2) at 2700ms and hits P2 with laser (P2 HP=${snapAfterP1Laser.p2.health})`
     );
 
-    // C. Test 60-Second Battle Timeout Winner Resolution
+    // Settle round 1 (extra 500ms): round finishes and signals completion
+    stepPvP(pvpController, 600);
+    const snapRound1Done = pvpController.getSnapshot();
+    assert(
+      snapRound1Done.isRoundFinished && !snapRound1Done.isBattleFinished,
+      'PvP Round Completion: Round 1 finishes when both programs complete, without ending the match'
+    );
+
+    // C. Test Multi-Round State Persistence & Round 2 Execution
+    pvpController.advanceToNextRound();
+    const snapRound2Start = pvpController.getSnapshot();
+    assert(
+      snapRound2Start.currentRound === 2 &&
+        snapRound2Start.p1.health === 65 &&
+        snapRound2Start.p2.health === 65 &&
+        snapRound2Start.p1.x === 2 &&
+        snapRound2Start.p2.x === 10,
+      'PvP Round 2 Progression: preserves robot health (65/65) and positions (2,7 and 10,7) across rounds'
+    );
+
+    // Execute Round 2 with fresh programs: P1 moves right, P2 moves left
+    const p1ProgR2 = validatePvPProgram('move_right()\nlaser()').instructions;
+    const p2ProgR2 = validatePvPProgram('move_left()\nshockwave()').instructions;
+    pvpController.startRoundBattle(p1ProgR2, p2ProgR2);
+    stepPvP(pvpController, 1400);
+    const snapRound2Step = pvpController.getSnapshot();
+    assert(
+      snapRound2Step.p1.x === 3 && snapRound2Step.p2.x === 9,
+      `PvP Round 2 Fresh Strategy: P1 advances to x=${snapRound2Step.p1.x} and P2 advances to x=${snapRound2Step.p2.x}`
+    );
+
+    // D. Test 60-Second Battle Timeout Winner Resolution
+    pvpController.resetMatch('P1', 'P2');
     const timeoutProg1 = validatePvPProgram('laser()').instructions;
     const timeoutWaitProg2 = validatePvPProgram('wait(1)').instructions;
-    pvpController.startBattle(timeoutProg1, timeoutWaitProg2, 'P1', 'P2');
+    pvpController.startRoundBattle(timeoutProg1, timeoutWaitProg2);
     stepPvP(pvpController, 60000);
     const timeoutSnap = pvpController.getSnapshot();
     assert(
@@ -776,16 +810,17 @@ export async function runInterpreterVerificationSuite(): Promise<{
         timeoutSnap.winner === 'P1' &&
         timeoutSnap.endReason === 'TIMEOUT' &&
         timeoutSnap.p1.health === 100 &&
-        timeoutSnap.p2.health === 76,
+        timeoutSnap.p2.health === 65,
       `PvP Timeout Resolution: P1 wins on 60s timeout with higher remaining HP (${timeoutSnap.p1.health} vs ${timeoutSnap.p2.health})`
     );
 
-    // D. Test Simultaneous Knockout (Fair Draw without P1/P2 Order Bias)
+    // E. Test Simultaneous Knockout (Fair Draw without P1/P2 Order Bias)
+    pvpController.resetMatch('Blue', 'Crimson');
     const koProg = validatePvPProgram(
-      'laser()\nlaser()\nlaser()\nlaser()\nlaser()'
+      'laser()\nlaser()\nlaser()\nlaser()'
     ).instructions;
-    pvpController.startBattle(koProg, koProg, 'Blue', 'Crimson');
-    stepPvP(pvpController, 7000);
+    pvpController.startRoundBattle(koProg, koProg);
+    stepPvP(pvpController, 5000);
     const doubleKoSnap = pvpController.getSnapshot();
     assert(
       doubleKoSnap.isBattleFinished &&
@@ -793,17 +828,18 @@ export async function runInterpreterVerificationSuite(): Promise<{
         doubleKoSnap.endReason === 'DOUBLE_KO' &&
         doubleKoSnap.p1.health === 0 &&
         doubleKoSnap.p2.health === 0,
-      `PvP Fair Simultaneous Resolution: mutual lethal lasers on the same tick result in DRAW (DOUBLE_KO)`
+      `PvP Fair Simultaneous Resolution: mutual lethal lasers in the same tick result in DRAW (DOUBLE_KO)`
     );
 
-    // E. Test Bomb & Shockwave in PvP + Rematch Reset
+    // F. Test Bomb & Shockwave in PvP + Rematch Reset
+    pvpController.resetMatch('P1', 'P2');
     const closeCombatP1 = validatePvPProgram(
-      'move_right()\nmove_right()\nmove_right()\nmove_right()\nbomb(7, 7)\nshockwave()'
+      'move_right()\nmove_right()\nmove_right()\nbomb(7, 7)\nshockwave()'
     ).instructions;
     const closeCombatP2 = validatePvPProgram(
-      'move_left()\nmove_left()\nmove_left()\nmove_left()\nwait(1)'
+      'move_left()\nmove_left()\nmove_left()\nwait(1)'
     ).instructions;
-    pvpController.startBattle(closeCombatP1, closeCombatP2, 'P1', 'P2');
+    pvpController.startRoundBattle(closeCombatP1, closeCombatP2);
     stepPvP(pvpController, 4200);
     const afterSwSnap = pvpController.getSnapshot();
     assert(
@@ -814,16 +850,17 @@ export async function runInterpreterVerificationSuite(): Promise<{
       `PvP Bomb & Shockwave: P1 places bomb and hits P2 with shockwave (P2 HP=${afterSwSnap.p2.health}, P1 HP=${afterSwSnap.p1.health})`
     );
 
-    // Test Rematch / Reset restores full health and spawn positions
-    pvpController.resetBattle(closeCombatP1, closeCombatP2, 'P1', 'P2');
+    // Test Rematch / Reset restores full health, starting spawns, round 1
+    pvpController.resetMatch('P1', 'P2');
     const rematchSnap = pvpController.getSnapshot();
     assert(
-      rematchSnap.p1.health === 100 &&
+      rematchSnap.currentRound === 1 &&
+        rematchSnap.p1.health === 100 &&
         rematchSnap.p2.health === 100 &&
         rematchSnap.p1.x === 2 &&
         rematchSnap.p2.x === 12 &&
         rematchSnap.bombs.length === 0,
-      'PvP Rematch Reset: restores both robots to 100 HP, starting positions, and clears bombs'
+      'PvP Rematch Reset: restores Round 1, both robots to 100 HP, starting positions, and clears bombs'
     );
   }
 

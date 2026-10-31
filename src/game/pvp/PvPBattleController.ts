@@ -15,8 +15,12 @@ import {
   PvPInstruction,
   PvPMatchConfig,
   PvPPlayerId,
+  PvPRoundPhase,
   PvPWinner,
 } from './pvpTypes';
+
+/** Temporary round-lifecycle debug logging. Set to false to silence. */
+const PVP_DEBUG = true;
 
 interface QueuedDamage {
   targetId: PvPPlayerId;
@@ -34,6 +38,16 @@ export class PvPBattleController {
   private walls: GridPosition[] = [];
   private bombs: BombState[] = [];
   private bombSequence = 0;
+
+  private currentRound = 1;
+  private roundPhase: PvPRoundPhase = 'PLAYER_1_PROGRAMMING';
+  private pendingP1Program: PvPInstruction[] | null = null;
+  private pendingP2Program: PvPInstruction[] | null = null;
+  private roundElapsedMs = 0;
+  private roundCompletionSettlingMs = 0;
+  private isRoundFinished = false;
+  private p1CompletionLogged = false;
+  private p2CompletionLogged = false;
 
   private battleElapsedMs = 0;
   private isBattleActive = false;
@@ -73,7 +87,7 @@ export class PvPBattleController {
       this.config.maxHealth
     );
 
-    this.resetBattle([], [], 'Player 1', 'Player 2', false);
+    this.resetMatch('Player 1', 'Player 2', false);
   }
 
   public attachView(view: IPvPArenaView | null): void {
@@ -83,31 +97,21 @@ export class PvPBattleController {
     }
   }
 
-  public startBattle(
-    p1Program: PvPInstruction[],
-    p2Program: PvPInstruction[],
-    p1Name = 'Player 1',
-    p2Name = 'Player 2'
-  ): void {
-    this.resetBattle(p1Program, p2Program, p1Name, p2Name);
-    this.isBattleActive = true;
-    this.isBattleFinished = false;
-    this.addCombatEvent(
-      'system',
-      `Robot Duel started! ${p1Name} vs ${p2Name}.`
-    );
-    const snap = this.getSnapshot();
-    this.view?.initPvPArena(snap);
-    this.callbacks.onSnapshotChange?.(snap);
-  }
-
-  public resetBattle(
-    p1Program: PvPInstruction[] = [],
-    p2Program: PvPInstruction[] = [],
+  /**
+   * Resets the entire match to Round 1: spawns, 100 HP, stats, bombs, and timer.
+   */
+  public resetMatch(
     p1Name = 'Player 1',
     p2Name = 'Player 2',
     notifyCallbacks = true
   ): void {
+    this.currentRound = 1;
+    this.roundPhase = 'PLAYER_1_PROGRAMMING';
+    this.pendingP1Program = null;
+    this.pendingP2Program = null;
+    this.roundElapsedMs = 0;
+    this.roundCompletionSettlingMs = 0;
+    this.isRoundFinished = false;
     this.battleElapsedMs = 0;
     this.isBattleActive = false;
     this.isBattleFinished = false;
@@ -122,8 +126,8 @@ export class PvPBattleController {
     this.combatEvents = [];
     this.combatEventSeq = 0;
 
-    this.p1Context.reset(p1Program, this.config, p1Name);
-    this.p2Context.reset(p2Program, this.config, p2Name);
+    this.p1Context.reset([], this.config, p1Name);
+    this.p2Context.reset([], this.config, p2Name);
     this.syncPlayerVariables();
 
     const snap = this.getSnapshot();
@@ -132,10 +136,186 @@ export class PvPBattleController {
       this.callbacks.onSnapshotChange?.(snap);
     }
     this.view?.initPvPArena(snap);
+    if (notifyCallbacks) {
+      this.debug('Match reset. Round started.');
+      this.debug('Player 1 programming.');
+    }
+  }
+
+  public getRoundPhase(): PvPRoundPhase {
+    return this.roundPhase;
+  }
+
+  /**
+   * Locks a player's program for the current round. Guarded so each lock
+   * happens exactly once and only in the correct phase:
+   *   P1 lock: PLAYER_1_PROGRAMMING -> PLAYER_2_PROGRAMMING
+   *   P2 lock: PLAYER_2_PROGRAMMING -> ROUND_EXECUTING (execution pending)
+   * Returns false (and does nothing) if called out of order.
+   */
+  public lockProgram(playerId: PvPPlayerId, program: PvPInstruction[]): boolean {
+    const copy = program.map((i) => ({ ...i, args: [...i.args] }));
+    if (playerId === 'P1' && this.roundPhase === 'PLAYER_1_PROGRAMMING') {
+      this.pendingP1Program = copy;
+      this.roundPhase = 'PLAYER_2_PROGRAMMING';
+      this.debug(`Player 1 locked program (${copy.length} instructions).`);
+      this.debug('Player 2 programming.');
+      return true;
+    }
+    if (playerId === 'P2' && this.roundPhase === 'PLAYER_2_PROGRAMMING') {
+      this.pendingP2Program = copy;
+      this.roundPhase = 'ROUND_EXECUTING';
+      this.debug(`Player 2 locked program (${copy.length} instructions).`);
+      this.debug('Both programs ready.');
+      return true;
+    }
+    this.debug(
+      `Ignored ${playerId} lock: phase is ${this.roundPhase}.`,
+      'warn'
+    );
+    return false;
+  }
+
+  /**
+   * Starts simultaneous execution of both locked programs. Runs exactly once
+   * per round: the pending programs are consumed, so repeat calls are no-ops.
+   */
+  public beginRoundExecution(): boolean {
+    if (
+      this.roundPhase !== 'ROUND_EXECUTING' ||
+      this.pendingP1Program === null ||
+      this.pendingP2Program === null
+    ) {
+      this.debug(
+        `Ignored beginRoundExecution: phase=${this.roundPhase}, programs ready=${
+          this.pendingP1Program !== null && this.pendingP2Program !== null
+        }.`,
+        'warn'
+      );
+      return false;
+    }
+
+    const p1Program = this.pendingP1Program;
+    const p2Program = this.pendingP2Program;
+    this.pendingP1Program = null;
+    this.pendingP2Program = null;
+
+    // Round-specific state only. Positions, HP, bombs, cooldowns, walls and the
+    // battle clock are deliberately untouched so they persist across rounds.
+    this.roundElapsedMs = 0;
+    this.roundCompletionSettlingMs = 0;
+    this.isRoundFinished = false;
+    // Drop any stale frame timestamp so the first frame of this round is never skipped.
+    this.lastFrameTimestamp = -1;
+    this.p1Context.startNewRound(p1Program, this.battleElapsedMs, this.config);
+    this.p2Context.startNewRound(p2Program, this.battleElapsedMs, this.config);
+    this.syncPlayerVariables();
+    this.isBattleActive = true;
+
+    this.debug(
+      `Execution started (P1: ${p1Program.length}, P2: ${p2Program.length} instructions).`
+    );
+    this.addCombatEvent(
+      'system',
+      `Round ${this.currentRound} began! Both robots executing instructions.`
+    );
+    this.callbacks.onSnapshotChange?.(this.getSnapshot());
+    return true;
+  }
+
+  /**
+   * Convenience used by tests: lock both programs and execute immediately.
+   * Only valid from PLAYER_1_PROGRAMMING.
+   */
+  public startRoundBattle(
+    p1Program: PvPInstruction[],
+    p2Program: PvPInstruction[]
+  ): boolean {
+    return (
+      this.lockProgram('P1', p1Program) &&
+      this.lockProgram('P2', p2Program) &&
+      this.beginRoundExecution()
+    );
+  }
+
+  /**
+   * ROUND_TRANSITION -> PLAYER_1_PROGRAMMING with round + 1. Preserves player
+   * health, positions, facing, active bombs and cooldowns. Guarded so a
+   * double trigger (auto-advance timer + "Next Round" click) advances once.
+   */
+  public advanceToNextRound(): boolean {
+    if (this.roundPhase !== 'ROUND_TRANSITION') {
+      this.debug(
+        `Ignored advanceToNextRound: phase is ${this.roundPhase}.`,
+        'warn'
+      );
+      return false;
+    }
+    this.currentRound += 1;
+    this.roundPhase = 'PLAYER_1_PROGRAMMING';
+    this.pendingP1Program = null;
+    this.pendingP2Program = null;
+    this.roundElapsedMs = 0;
+    this.roundCompletionSettlingMs = 0;
+    this.isRoundFinished = false;
+    this.isBattleActive = false;
+    this.syncPlayerVariables();
+
+    this.debug('Next round started.');
+    this.debug('Player 1 programming.');
+    this.addCombatEvent(
+      'system',
+      `Round ${this.currentRound} planning phase started.`
+    );
+    this.callbacks.onSnapshotChange?.(this.getSnapshot());
+    return true;
+  }
+
+  public startBattle(
+    p1Program: PvPInstruction[],
+    p2Program: PvPInstruction[],
+    p1Name = 'Player 1',
+    p2Name = 'Player 2'
+  ): void {
+    this.resetMatch(p1Name, p2Name, false);
+    this.startRoundBattle(p1Program, p2Program);
+    const snap = this.getSnapshot();
+    this.view?.initPvPArena(snap);
+    this.callbacks.onSnapshotChange?.(snap);
+  }
+
+  public resetBattle(
+    p1Program: PvPInstruction[] = [],
+    p2Program: PvPInstruction[] = [],
+    p1Name = 'Player 1',
+    p2Name = 'Player 2',
+    notifyCallbacks = true
+  ): void {
+    this.resetMatch(p1Name, p2Name, notifyCallbacks);
+    if (p1Program.length > 0 || p2Program.length > 0) {
+      this.startRoundBattle(p1Program, p2Program);
+    }
   }
 
   public stopBattle(): void {
     this.isBattleActive = false;
+  }
+
+  private debug(message: string, level: 'log' | 'warn' = 'log'): void {
+    if (!PVP_DEBUG) return;
+    console[level](`[PvP][Round ${this.currentRound}] ${message}`);
+  }
+
+  private finishRound(reason: string): void {
+    if (this.roundPhase !== 'ROUND_EXECUTING') return;
+    this.isBattleActive = false;
+    this.isRoundFinished = true;
+    this.roundPhase = 'ROUND_TRANSITION';
+    this.debug(`Round completed (${reason}).`);
+    this.addCombatEvent('system', `Round ${this.currentRound} complete. ${reason}`);
+    const snap = this.getSnapshot();
+    this.callbacks.onSnapshotChange?.(snap);
+    this.callbacks.onRoundFinished?.(snap);
   }
 
   /**
@@ -174,6 +354,7 @@ export class PvPBattleController {
     const nextElapsed = Math.min(maxBattleMs, this.battleElapsedMs + stepMs);
     const actualDelta = nextElapsed - this.battleElapsedMs;
     this.battleElapsedMs = nextElapsed;
+    this.roundElapsedMs += actualDelta;
 
     // 1. Update cooldowns & invulnerability timers on both isolated contexts
     this.p1Context.updateTimers(actualDelta);
@@ -199,6 +380,38 @@ export class PvPBattleController {
     // 4. Check 60-second battle timeout
     if (this.battleElapsedMs >= maxBattleMs) {
       this.resolveTimeoutEnd();
+      return;
+    }
+
+    // 5. Check if round has completed (both programs finished or max round safety timeout reached)
+    const p1WasDone = this.p1Context.isRoundCompleted();
+    const p2WasDone = this.p2Context.isRoundCompleted();
+    // isActionDue() also promotes a finished trailing wait(n) to FINISHED.
+    this.p1Context.isActionDue(this.battleElapsedMs);
+    this.p2Context.isActionDue(this.battleElapsedMs);
+    const p1Done = this.p1Context.isRoundCompleted();
+    const p2Done = this.p2Context.isRoundCompleted();
+    if (p1Done && !this.p1CompletionLogged) {
+      this.p1CompletionLogged = true;
+      this.debug(`Player 1 program completed${p1WasDone ? '' : ''}.`);
+    }
+    if (p2Done && !this.p2CompletionLogged) {
+      this.p2CompletionLogged = true;
+      this.debug(`Player 2 program completed${p2WasDone ? '' : ''}.`);
+    }
+    const maxRoundDurationMs =
+      this.config.maxInstructionSlots *
+        (this.config.instructionIntervalMs + this.config.waitMaxSeconds * 1000) +
+      1500;
+
+    if (p1Done && p2Done) {
+      // Short settling period so the final animations play before freezing.
+      this.roundCompletionSettlingMs += actualDelta;
+      if (this.roundCompletionSettlingMs >= 500) {
+        this.finishRound('Both programs executed.');
+      }
+    } else if (this.roundElapsedMs >= maxRoundDurationMs) {
+      this.finishRound('Round safety time limit reached.');
     }
   }
 
@@ -821,6 +1034,10 @@ export class PvPBattleController {
     );
     return {
       gridSize: this.config.gridSize,
+      currentRound: this.currentRound,
+      roundPhase: this.roundPhase,
+      roundElapsedMs: this.roundElapsedMs,
+      isRoundFinished: this.isRoundFinished,
       battleElapsedMs: this.battleElapsedMs,
       battleRemainingSeconds: Math.ceil(remainingMs / 1000),
       battleDurationSeconds: this.config.battleDurationSeconds,

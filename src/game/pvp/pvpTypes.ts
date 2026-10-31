@@ -14,10 +14,29 @@ export type PvPPhase =
   | 'P1_PROGRAMMING'
   | 'HANDOVER'
   | 'P2_PROGRAMMING'
+  | 'ROUND_COUNTDOWN'
   | 'BATTLE'
+  | 'ROUND_INTERMISSION'
   | 'RESULTS';
 
 export type PvPPlayerId = 'P1' | 'P2';
+
+/**
+ * Authoritative round state machine owned by PvPBattleController.
+ * (PvPPhase above is the UI presentation layer: handover/countdown screens.)
+ *
+ * PLAYER_1_PROGRAMMING --P1 locks--> PLAYER_2_PROGRAMMING
+ * PLAYER_2_PROGRAMMING --P2 locks--> ROUND_EXECUTING
+ * ROUND_EXECUTING --both programs done--> ROUND_TRANSITION
+ * ROUND_TRANSITION --advanceToNextRound--> PLAYER_1_PROGRAMMING (round + 1)
+ * any --knockout / battle clock expiry--> MATCH_FINISHED
+ */
+export type PvPRoundPhase =
+  | 'PLAYER_1_PROGRAMMING'
+  | 'PLAYER_2_PROGRAMMING'
+  | 'ROUND_EXECUTING'
+  | 'ROUND_TRANSITION'
+  | 'MATCH_FINISHED';
 
 export type PvPExecutionState = 'RUNNING' | 'WAITING' | 'FINISHED' | 'DEFEATED';
 
@@ -72,6 +91,10 @@ export interface PvPPlayerSnapshot {
 
 export interface PvPBattleSnapshot {
   gridSize: number;
+  currentRound: number;
+  roundPhase: PvPRoundPhase;
+  roundElapsedMs: number;
+  isRoundFinished: boolean;
   battleElapsedMs: number;
   battleRemainingSeconds: number;
   battleDurationSeconds: number;
@@ -112,8 +135,8 @@ export interface PvPMatchConfig {
 export const DEFAULT_PVP_CONFIG: PvPMatchConfig = {
   gridSize: 15,
   maxHealth: 100,
-  maxInstructionSlots: 12,
-  programmingTimeSeconds: 60,
+  maxInstructionSlots: 5,
+  programmingTimeSeconds: 30,
   battleDurationSeconds: 60,
   instructionIntervalMs: 700,
   waitMinSeconds: 1,
@@ -196,6 +219,7 @@ export interface IPvPArenaView {
 export interface PvPBattleCallbacks {
   onSnapshotChange?: (snapshot: PvPBattleSnapshot) => void;
   onCombatEventsChange?: (events: CombatEventEntry[]) => void;
+  onRoundFinished?: (snapshot: PvPBattleSnapshot) => void;
   onBattleFinished?: (snapshot: PvPBattleSnapshot) => void;
 }
 

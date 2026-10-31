@@ -126,6 +126,56 @@ export class PvPInterpreterContext {
     };
   }
 
+  /**
+   * Prepares the player for a fresh round in a continuous match.
+   * Preserves health, position, facing direction, stats, and cooldowns.
+   */
+  public startNewRound(
+    program: PvPInstruction[],
+    currentBattleElapsedMs: number,
+    config: PvPMatchConfig
+  ): void {
+    if (!this.alive || this.health <= 0) {
+      this.program = [];
+      this.instructionPointer = 0;
+      this.executionState = 'DEFEATED';
+      this.nextActionTimeMs = Infinity;
+      this.lastActionText = 'Destroyed';
+      return;
+    }
+
+    // Deep clone fresh program for this round
+    this.program = program.map((instr) => ({
+      ...instr,
+      args: [...instr.args],
+    }));
+    this.instructionPointer = 0;
+
+    if (this.program.length > 0) {
+      this.executionState = 'RUNNING';
+      this.nextActionTimeMs =
+        currentBattleElapsedMs + config.instructionIntervalMs;
+      this.lastActionText = 'Ready for round';
+    } else {
+      this.executionState = 'FINISHED';
+      this.nextActionTimeMs = Infinity;
+      this.lastActionText = 'Idle (no instructions)';
+    }
+
+    this.updateVariables(
+      this.variables.enemy_x,
+      this.variables.enemy_y,
+      this.variables.enemy_count > 0
+    );
+  }
+
+  public isRoundCompleted(): boolean {
+    if (!this.alive || this.health <= 0) return true;
+    return (
+      this.executionState === 'FINISHED' || this.executionState === 'DEFEATED'
+    );
+  }
+
   public updateTimers(deltaMs: number): void {
     if (this.invulnerableRemainingMs > 0) {
       this.invulnerableRemainingMs = Math.max(
@@ -163,7 +213,12 @@ export class PvPInterpreterContext {
       return false;
     }
     if (this.instructionPointer >= this.program.length) {
-      this.executionState = 'FINISHED';
+      // A trailing wait(n) must fully elapse before the program counts as finished.
+      if (battleElapsedMs >= this.nextActionTimeMs) {
+        this.executionState = 'FINISHED';
+        this.nextActionTimeMs = Infinity;
+        this.lastActionText = 'Program complete';
+      }
       return false;
     }
     return battleElapsedMs >= this.nextActionTimeMs;
@@ -196,9 +251,10 @@ export class PvPInterpreterContext {
 
     if (this.instructionPointer >= this.program.length) {
       if (waitSeconds > 0) {
-        // Still wait out the final wait(n) before marking finished, or mark finished after wait
-        this.executionState = 'FINISHED';
-        this.nextActionTimeMs = Infinity;
+        // Final instruction was wait(n): stay WAITING until it elapses.
+        // isActionDue() marks the program FINISHED once the wait is over.
+        this.executionState = 'WAITING';
+        this.nextActionTimeMs = currentStepTimeMs + waitSeconds * 1000;
       } else {
         this.executionState = 'FINISHED';
         this.nextActionTimeMs = Infinity;
